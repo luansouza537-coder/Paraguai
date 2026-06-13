@@ -1,0 +1,6 @@
+{
+  "name": "Guerra Brasil-Paraguai: Grand Strategy",
+  "description": "Um jogo de grande estratégia focado em um conflito futuro entre Brasil e Paraguai, com profundos elementos políticos, econômicos, logísticos, militares e eventos dinâmicos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
