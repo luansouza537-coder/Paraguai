@@ -184,11 +184,15 @@ export const RealSatelliteMap: React.FC<RealSatelliteMapProps> = ({
       const totalArmies = prov.armies.infantry + prov.armies.artillery + prov.armies.tanks;
       const statusLabel = isOwned ? 'Aliado (Sua Linha)' : 'Fronte Oponente';
       
+      const terrainLabel = prov.terrain === 'jungle' ? '🌿 Selva' : prov.terrain === 'chaco' ? '🏜️ Chaco' : prov.terrain === 'urban' ? '🏙️ Urbano' : '🌾 Planície';
+      const riverTag = prov.hasRiver ? ' 🌊' : '';
+      const aquiferTag = prov.onAquifer ? ' 💧' : '';
       const tooltipContent = `
         <div style="font-family: monospace; font-size: 11px; padding: 4px; border-radius: 4px; color: #fff;">
           <div style="font-weight: bold; font-size: 12px; margin-bottom: 2px; color: ${color};">${prov.name}</div>
           <div>País d'Origem: <strong>${prov.country}</strong></div>
           <div>Controlado por: <span style="font-weight: bold; color: ${isBrazil ? '#22c55e' : '#f59e0b'}">${prov.controller}</span> (${statusLabel})</div>
+          <div style="margin-top: 2px; color: #a3a3a3; font-size: 10px;">${terrainLabel}${riverTag}${aquiferTag}</div>
           <div style="margin-top: 4px; border-top: 1px solid #444; padding-top: 4px; color: #38bdf8">
             Poder de Fogo: <strong>${totalArmies} Divisões</strong>
           </div>

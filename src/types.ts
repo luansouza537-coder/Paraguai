@@ -4,13 +4,14 @@
 
 export type Country = 'Brasil' | 'Paraguai';
 
-export type ResourceType = 'money' | 'steel' | 'oil' | 'food';
+export type ResourceType = 'money' | 'steel' | 'oil' | 'food' | 'energia';
 
 export interface ResourceState {
   money: number;  // em bilhões de R$ / Gs.
   steel: number;  // em megatoneladas
   oil: number;    // em barris/fluxo
   food: number;   // suprimento alimentar
+  energia?: number; // megawatts gerados por hidroelétricas
 }
 
 export type MilitaryUnitType = 'infantry' | 'artillery' | 'tanks';
@@ -21,7 +22,7 @@ export interface UnitState {
   tanks: number;
 }
 
-export type BuildingType = 'industrial' | 'refinery' | 'fortress' | 'logistics';
+export type BuildingType = 'industrial' | 'refinery' | 'fortress' | 'logistics' | 'hydroelectric' | 'airbase' | 'ethanolRefinery';
 
 export interface Province {
   id: string;
@@ -29,11 +30,17 @@ export interface Province {
   country: Country;
   controller: Country;
   resources: ResourceState;
+  terrain?: 'plains' | 'jungle' | 'chaco' | 'urban';
+  hasRiver?: boolean;
+  onAquifer?: boolean;
   buildings: {
-    industrial: number; // Gera Dinheiro e Aço
-    refinery: number;   // Gera Petróleo
-    fortress: number;   // Defesa de Combate
-    logistics: number;  // Reduz desgaste e aumenta suprimentos
+    industrial: number;    // Gera Dinheiro e Aço
+    refinery: number;      // Gera Petróleo
+    fortress: number;      // Defesa de Combate
+    logistics: number;     // Reduz desgaste e aumenta suprimentos
+    hydroelectric?: number; // Gera Energia (⚡), requer hasRiver
+    airbase?: number;       // Pré-requisito para esquadrões de aviação
+    ethanolRefinery?: number; // Converte Alimento → Petróleo
   };
   armies: UnitState;
   connections: string[]; // IDs das províncias conectadas para movimento/ataque
@@ -81,19 +88,43 @@ export interface GameState {
   weather?: 'clear' | 'rain' | 'mud' | 'fog';
   customNames?: Record<string, string>;
   unlockedAchievements?: string[];
+  warTaxRate?: 0 | 1 | 2 | 3; // 0=normal, 1=leve, 2=pesado, 3=guerra total
+  aviation?: number;           // esquadrões de aviação (ativo nacional)
 }
 
 export const UNIT_COSTS: Record<MilitaryUnitType, ResourceState> = {
   infantry: { money: 10, steel: 2, oil: 1, food: 3 },
   artillery: { money: 20, steel: 8, oil: 2, food: 2 },
-  tanks: { money: 40, steel: 15, oil: 10, food: 1 },
+  tanks: { money: 40, steel: 15, oil: 6, food: 1 },
 };
 
+// Manutenção por turno (dinheiro) de edifícios e tropas
+export const BUILDING_MAINTENANCE: Record<BuildingType, number> = {
+  industrial:      5,   // por nível
+  refinery:        4,
+  fortress:        2,
+  logistics:       3,
+  hydroelectric:   6,
+  airbase:         8,
+  ethanolRefinery: 5,
+};
+
+export const TROOP_MAINTENANCE = {
+  infantry:  (n: number) => Math.floor(n / 3),       // 1 moeda a cada 3 soldados
+  artillery: (n: number) => n * 2,
+  tanks:     (n: number) => n * 3,
+};
+
+export const MAX_BUILDING_LEVEL = 3;
+
 export const BUILDING_COSTS: Record<BuildingType, ResourceState> = {
-  industrial: { money: 50, steel: 10, oil: 5, food: 5 },
-  refinery: { money: 60, steel: 15, oil: 5, food: 2 },
-  fortress: { money: 40, steel: 20, oil: 2, food: 2 },
-  logistics: { money: 30, steel: 8, oil: 4, food: 6 },
+  industrial:      { money: 50, steel: 10, oil: 5,  food: 5 },
+  refinery:        { money: 60, steel: 15, oil: 5,  food: 2 },
+  fortress:        { money: 40, steel: 20, oil: 2,  food: 2 },
+  logistics:       { money: 30, steel:  8, oil: 4,  food: 6 },
+  hydroelectric:   { money: 80, steel: 25, oil: 5,  food: 3 },
+  airbase:         { money: 70, steel: 20, oil: 10, food: 2 },
+  ethanolRefinery: { money: 45, steel: 10, oil: 2,  food: 8 },
 };
 
 export const UNIT_STATS = {
