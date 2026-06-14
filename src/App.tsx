@@ -1867,7 +1867,7 @@ export default function App() {
 
       {/* FLUXO PRINCIPAL DO JOGO (TEATRO DE OPERAÇÕES) */}
       {gameState.gamePhase === 'playing' && (
-        <main className="flex-1 grid grid-cols-1 xl:grid-cols-12 gap-5 p-5 bg-stone-950">
+        <main className="flex-1 grid grid-cols-1 xl:grid-cols-12 gap-5 p-5 bg-stone-950 items-start">
           
           {/* TABELA ESQUERDA: MAPA DO TABULEIRO (7 COLUNAS) */}
           <section className="xl:col-span-7 flex flex-col bg-stone-900 border border-stone-800 rounded-xl overflow-hidden shadow-2xl relative min-h-[500px] xl:min-h-[700px]">
@@ -2859,7 +2859,7 @@ export default function App() {
           </section>
 
           {/* TABELA DIREITA: CONTROLE MILITAR DE COMANDO (5 COLUNAS) */}
-          <section className="xl:col-span-12 xl:order-last min-w-0 flex flex-col space-y-5 lg:grid lg:grid-cols-2 lg:gap-5 lg:space-y-0 xl:grid-cols-1 xl:flex xl:col-span-5">
+          <section className="xl:col-span-5 min-w-0 flex flex-col space-y-5 overflow-y-auto max-h-[calc(100vh-120px)]">
             
             {/* 1. PAINEL ADVISOR: CONSELEIRO MILITAR DE IA */}
             <div className="bg-stone-900 border border-stone-800 rounded-xl p-5 shadow-lg relative overflow-hidden flex flex-col justify-between">
