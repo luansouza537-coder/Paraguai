@@ -86,7 +86,7 @@ export interface GameState {
 export const UNIT_COSTS: Record<MilitaryUnitType, ResourceState> = {
   infantry: { money: 10, steel: 2, oil: 1, food: 3 },
   artillery: { money: 20, steel: 8, oil: 2, food: 2 },
-  tanks: { money: 40, steel: 15, oil: 10, food: 1 },
+  tanks: { money: 40, steel: 15, oil: 6, food: 1 },
 };
 
 export const BUILDING_COSTS: Record<BuildingType, ResourceState> = {

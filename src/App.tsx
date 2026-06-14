@@ -233,6 +233,8 @@ export default function App() {
     let interval: any = null;
     if (gameState.autoTurnInterval && gameState.gamePhase === 'playing') {
       interval = setInterval(() => {
+        // Pausa automaticamente se houver evento ativo aguardando decisão
+        if (gameState.activeEvent) return;
         handleEndTurn();
       }, 5000); // Avança a cada 5 segundos
     }
@@ -250,6 +252,20 @@ export default function App() {
     winner: 'attacker' | 'defender';
     troopsUsed: any;
   } | null>(null);
+
+  const [pendingAttack, setPendingAttack] = useState<{
+    inf: number; tnk: number;
+    originName: string; targetName: string;
+  } | null>(null);
+
+  const [battleHistory, setBattleHistory] = useState<Array<{
+    turn: number;
+    originName: string;
+    targetName: string;
+    winner: 'attacker' | 'defender';
+    attackerLosses: { infantry: number; tanks: number };
+    defenderLosses: { infantry: number; tanks: number };
+  }>>([]);
 
   // Assistência para encontrar se as províncias estão supridas
   // Uma província está suprida se ela tem uma conexão direta de caminho
@@ -406,8 +422,8 @@ export default function App() {
     const isBrazil = country === 'Brasil';
     
     const startResources = isBrazil
-      ? { money: 140, steel: 50, oil: 30, food: 70 }
-      : { money: 100, steel: 35, oil: 60, food: 55 }; // Paraguai tem mais óleo no Chaco (Boquerón), menor renda inicial
+      ? { money: 120, steel: 50, oil: 30, food: 70 }
+      : { money: 100, steel: 35, oil: 55, food: 55 }; // Paraguai tem mais óleo no Chaco (Boquerón), menor renda inicial
 
     setGameState(prev => ({
       ...prev,
@@ -675,11 +691,15 @@ export default function App() {
       const attackerSupplied = checkIsSupplied(originId, gameState.playerCountry);
       const defenderSupplied = checkIsSupplied(destId, destination.controller);
 
+      const foodStarved = gameState.resources.food < 20;
       const combatUnits = {
-        infantry: sendInfantry,
-        artillery: sendArtillery,
-        tanks: sendTanks
+        infantry: foodStarved ? Math.round(sendInfantry * 0.8) : sendInfantry,
+        artillery: foodStarved ? Math.round(sendArtillery * 0.8) : sendArtillery,
+        tanks: foodStarved ? Math.round(sendTanks * 0.8) : sendTanks,
       };
+      if (foodStarved) {
+        addLog('[Moral] Escassez de alimentos: tropas combatem com -20% de eficácia ofensiva.');
+      }
 
       const result = simulateCombat(
         origin, 
@@ -712,9 +732,14 @@ export default function App() {
           // O exército vencedor remanescente é transferido para a província capturada
           updatedDest.armies = result.attackerRemainingBeforeLogistics;
           
-          // Popularidade ganha
+          // Popularidade ganha — penalidade de overextension ao controlar muitas províncias
+          const playerControlled = Object.values(updatedProvinces).filter((p: any) => p.controller === prev.playerCountry).length;
+          const overextPenalty = playerControlled > 11 ? -10 : playerControlled > 8 ? -4 : 0;
           const popGain = Math.min(100, prev.popularity + 10);
-          const stabGain = Math.min(100, prev.stability + 5);
+          const stabGain = Math.min(100, Math.max(0, prev.stability + 5 + overextPenalty));
+          if (overextPenalty < 0) {
+            // log será adicionado pelo log existente
+          }
 
           let nextState = {
             ...prev,
@@ -769,6 +794,16 @@ export default function App() {
         }
       });
       playSynthSound('combat');
+
+      // Registra no histórico de batalhas
+      setBattleHistory(prev => [{
+        turn: gameState.turn,
+        originName: origin.name,
+        targetName: destination.name,
+        winner: result.winner,
+        attackerLosses: { infantry: result.attackerLosses.infantry, tanks: result.attackerLosses.tanks },
+        defenderLosses: { infantry: result.defenderLosses.infantry, tanks: result.defenderLosses.tanks },
+      }, ...prev].slice(0, 10));
 
       // Configura os detalhes para exibição no Modal animado de Combate
       setCombatDetailsModal({
@@ -983,6 +1018,12 @@ export default function App() {
 
   // Avançar Turno (Fim de Turno)
   const handleEndTurn = () => {
+    // Pré-calcula supply para todas as províncias uma única vez (evita O(n²) do BFS repetido)
+    const supplyCache: Record<string, boolean> = {};
+    Object.keys(gameState.provinces).forEach(id => {
+      supplyCache[id] = checkIsSupplied(id, gameState.provinces[id].controller);
+    });
+
     setGameState(prev => {
       const currentTurn = prev.turn;
       const nextTurn = currentTurn + 1;
@@ -1046,13 +1087,17 @@ export default function App() {
       updatedResources.food = Math.max(0, updatedResources.food - foodConsumption);
 
       // 2. ATRIÇÃO E LOGÍSTICA DE FRONTEIRA (PROVÍNCIAS ISOLADAS DE SUPRIMENTOS)
-      const updatedProvinces = JSON.parse(JSON.stringify(prev.provinces));
+      const updatedProvinces: Record<string, Province> = {};
+      Object.entries(prev.provinces).forEach(([id, p]) => {
+        const prov = p as Province;
+        updatedProvinces[id] = { ...prov, armies: { ...prov.armies }, buildings: { ...prov.buildings }, resources: { ...prov.resources } };
+      });
       let attritionLogs: string[] = [];
 
       Object.keys(updatedProvinces).forEach(id => {
         const prov = updatedProvinces[id];
         if (prov.controller === player) {
-          const isSupplied = checkIsSupplied(id, player);
+          const isSupplied = supplyCache[id] ?? checkIsSupplied(id, player);
           const totalTroops = prov.armies.infantry + prov.armies.artillery + prov.armies.tanks;
           
           if (!isSupplied && totalTroops > 0) {
@@ -1078,32 +1123,41 @@ export default function App() {
       const isPlayerBrazil = player === 'Brasil';
       const aiCountry = isPlayerBrazil ? 'Paraguai' : 'Brasil';
 
-      // IA Recruta tropas automaticamente baseada nas províncias que possui
+      // IA Recruta tropas — quanto menos províncias, maior o bônus de resistência (anti-snowball)
+      const aiProvinceCount = Object.values(updatedProvinces).filter((p: any) => p.controller === aiCountry).length;
+      const playerProvinceCount = Object.values(updatedProvinces).filter((p: any) => p.controller === player).length;
+      const aiUnderdog = playerProvinceCount > aiProvinceCount + 2; // IA em desvantagem numérica
+      const aiRecruitBonus = aiUnderdog ? 2 : 1; // Bônus de resistência para nação menor
+
       Object.keys(updatedProvinces).forEach(id => {
         const prov = updatedProvinces[id];
         if (prov.controller === aiCountry) {
-          // Incrementação de unidades básica simulada para esforço bélico concorrente
-          const spawnInf = Math.random() > 0.4 ? 1 : 0;
-          const spawnTnk = Math.random() > 0.7 ? 1 : 0;
-          
+          // Recruta baseado em capacidade industrial + bônus anti-snowball
+          const hasIndustry = (prov.buildings.industrial || 0) > 0;
+          const spawnInf = (Math.random() > 0.3 ? 1 : 0) + (hasIndustry ? 1 : 0) + (aiUnderdog ? aiRecruitBonus - 1 : 0);
+          const spawnTnk = Math.random() > 0.55 ? 1 : 0;
+          const spawnArt = hasIndustry && Math.random() > 0.7 ? 1 : 0;
+
           prov.armies.infantry += spawnInf;
           prov.armies.tanks += spawnTnk;
+          prov.armies.artillery += spawnArt;
         }
       });
 
-      // IA Identifica uma oportunidade de Ataque
-      let aiAttackLaunched = false;
+      // IA Identifica oportunidades de Ataque — pode lançar até 2 ofensivas por turno
+      let aiAttacksLaunched = 0;
+      const maxAiAttacks = aiUnderdog ? 2 : 1; // IA em desvantagem pode atacar em 2 frentes
       const aiProvinces = (Object.values(updatedProvinces) as Province[]).filter(p => p.controller === aiCountry);
-      
+
       // Ordenação randômica para variação tática
       const shuffledAiProvinces = [...aiProvinces].sort(() => Math.random() - 0.5);
 
       for (const aiProv of shuffledAiProvinces) {
-        if (aiAttackLaunched) break;
+        if (aiAttacksLaunched >= maxAiAttacks) break;
 
         const aiTotalForces = aiProv.armies.infantry + aiProv.armies.artillery + aiProv.armies.tanks;
-        // Só ataca se tiver força superior a 15 divisões acumuladas na província
-        if (aiTotalForces > 15) {
+        // Threshold de ataque reduzido para IA mais agressiva (8 divisões vs 15 anterior)
+        if (aiTotalForces > 8) {
           // Procura vizinho hostil (controlado pelo jogador) de defesa vulnerável
           const playerTargets = aiProv.connections
             .map(cId => updatedProvinces[cId] as Province)
@@ -1119,7 +1173,9 @@ export default function App() {
 
             const targetDefStrength = weakestTarget.armies.infantry + weakestTarget.armies.artillery + weakestTarget.armies.tanks;
 
-            if (aiTotalForces > targetDefStrength * 1.2) {
+            // Threshold reduzido: ataca se tiver paridade ou leve vantagem (era 1.2x)
+            const aiAttackThreshold = aiUnderdog ? 1.0 : 1.1;
+            if (aiTotalForces > targetDefStrength * aiAttackThreshold) {
               // Executa ataque da IA inimiga! Envia 70% das forças
               const sendInf = Math.round(aiProv.armies.infantry * 0.7);
               const sendArt = Math.round(aiProv.armies.artillery * 0.7);
@@ -1128,8 +1184,8 @@ export default function App() {
               const aiCombatUnits = { infantry: sendInf, artillery: sendArt, tanks: sendTnk };
               
               // Simulação
-              const aiAttackerSupplied = checkIsSupplied(aiProv.id, aiCountry);
-              const playerDefenderSupplied = checkIsSupplied(weakestTarget.id, player);
+              const aiAttackerSupplied = supplyCache[aiProv.id] ?? true;
+              const playerDefenderSupplied = supplyCache[weakestTarget.id] ?? true;
 
               const aiResult = simulateCombat(
                 aiProv,
@@ -1163,7 +1219,7 @@ export default function App() {
                 aiTensionLogs.push(`[ATAQUE REPELIDO] O inimigo tentou invadir ${weakestTarget.name}, mas nossas defesas integradas mantiveram a linha!`);
               }
 
-              aiAttackLaunched = true;
+              aiAttacksLaunched++;
             }
           }
         }
@@ -1766,6 +1822,15 @@ export default function App() {
                   <div className="flex items-center space-x-2 text-[11px] text-stone-400 border-t border-stone-850 pt-1 mt-1">
                     <span>* Clique para selecionar. Conecte com vizinho para atacar.</span>
                   </div>
+                  {mapMode === '3d' && (
+                    <div className="border-t border-stone-850 pt-1 mt-1 space-y-1 text-[10px] text-stone-500">
+                      <div className="font-bold text-stone-400 mb-0.5">CONTROLES 3D</div>
+                      <div>🖱️ Arrastar → rotacionar</div>
+                      <div>📐 Barra Pitch → inclinar</div>
+                      <div>🔎 Barra Zoom → aproximar</div>
+                      <div>↺ Resetar → restaurar ângulos</div>
+                    </div>
+                  )}
                 </div>
 
                 {/* VISUALIZAÇÃO DO MAPA INTEGRADO */}
@@ -2638,26 +2703,31 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Informações de recursos gerados nesta província */}
-                  <div className="bg-stone-950/80 p-3 rounded-lg border border-stone-850 text-xs">
-                    <span className="text-[10px] text-stone-500 font-mono uppercase block mb-1.5 tracking-wider">Potencial de Produção Local / Recursos Base:</span>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 font-mono text-stone-300">
-                      <div className="flex justify-between border-b border-stone-900 pb-1">
-                        <span>Dinheiro:</span> 
-                        <span className="font-bold text-amber-400">+R$ {(selectedProvince.resources.money * 0.15 + selectedProvince.buildings.industrial * 12).toFixed(1)}B / turno</span>
-                      </div>
-                      <div className="flex justify-between border-b border-stone-900 pb-1">
-                        <span>Aço:</span> 
-                        <span className="font-bold text-cyan-300">+{Math.round(selectedProvince.resources.steel * 0.12 + selectedProvince.buildings.industrial * 5)}MT / turno</span>
-                      </div>
-                      <div className="flex justify-between border-b border-stone-900 pb-1">
-                        <span>Petróleo:</span> 
-                        <span className="font-bold text-orange-400">+{Math.round(selectedProvince.resources.oil * 0.12 + selectedProvince.buildings.refinery * 8)}bbl / turno</span>
-                      </div>
-                      <div className="flex justify-between border-b border-stone-900 pb-1">
-                        <span>Alimentos:</span> 
-                        <span className="font-bold text-emerald-400">+{Math.round(selectedProvince.resources.food * 0.15 + selectedProvince.buildings.logistics * 4)}ton / turno</span>
-                      </div>
+                  {/* Produção detalhada por província */}
+                  <div className="bg-stone-950/80 p-3 rounded-lg border border-stone-850 text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-stone-500 font-mono uppercase tracking-wider">Produção / Turno</span>
+                      {selectedProvince.controller === gameState.playerCountry
+                        ? <span className="text-[9px] text-emerald-400 font-mono bg-emerald-950/40 px-1.5 py-0.5 rounded">● ATIVA</span>
+                        : <span className="text-[9px] text-rose-400 font-mono bg-rose-950/40 px-1.5 py-0.5 rounded">● INIMIGA</span>
+                      }
+                    </div>
+                    <div className="space-y-1 font-mono text-stone-300">
+                      {[
+                        { label: 'Dinheiro', base: +(selectedProvince.resources.money * 0.15).toFixed(1), bld: selectedProvince.buildings.industrial * 12, unit: 'B', color: 'text-amber-400' },
+                        { label: 'Aço', base: Math.round(selectedProvince.resources.steel * 0.12), bld: selectedProvince.buildings.industrial * 5, unit: 'MT', color: 'text-cyan-300' },
+                        { label: 'Petróleo', base: Math.round(selectedProvince.resources.oil * 0.12), bld: selectedProvince.buildings.refinery * 8, unit: 'bbl', color: 'text-orange-400' },
+                        { label: 'Alimentos', base: Math.round(selectedProvince.resources.food * 0.15), bld: selectedProvince.buildings.logistics * 4, unit: 'ton', color: 'text-emerald-400' },
+                      ].map(({ label, base, bld, unit, color }) => (
+                        <div key={label} className="flex items-center justify-between border-b border-stone-900/60 pb-1 last:border-0 last:pb-0">
+                          <span className="text-stone-500">{label}:</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-stone-600 text-[9px]">base {base}{unit}</span>
+                            {bld > 0 && <span className="text-stone-600 text-[9px]">+{bld}{unit} edif.</span>}
+                            <span className={`font-bold ${color}`}>= {+(base + bld).toFixed(1)}{unit}</span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
 
@@ -2950,13 +3020,17 @@ export default function App() {
                               const tnkInput = document.getElementById('send_tanks_input') as HTMLInputElement;
                               const inf = parseInt(infInput?.value || '0', 10);
                               const tnk = parseInt(tnkInput?.value || '0', 10);
-                              
-                              executeMilitaryOrder(inf, 0, tnk);
+                              if (targetProvince.controller !== gameState.playerCountry) {
+                                // Ataque: exige confirmação
+                                setPendingAttack({ inf, tnk, originName: selectedProvince.name, targetName: targetProvince.name });
+                              } else {
+                                executeMilitaryOrder(inf, 0, tnk);
+                              }
                             }}
                             className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 text-stone-950 font-bold uppercase tracking-wider text-xs rounded transition duration-150 cursor-pointer"
                           >
-                            {targetProvince.controller === gameState.playerCountry 
-                              ? 'Iniciar Trânsito de Reforço' 
+                            {targetProvince.controller === gameState.playerCountry
+                              ? 'Iniciar Trânsito de Reforço'
                               : 'Declarar Assalto Militar de Invasão'}
                           </button>
                         </div>
@@ -2981,6 +3055,25 @@ export default function App() {
             </div>
 
             {/* 3. LOG DE COMISSÃO DA CAMPANHA */}
+            {/* HISTÓRICO DE BATALHAS */}
+            {battleHistory.length > 0 && (
+              <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 shadow-lg">
+                <span className="font-bold text-xs tracking-wider uppercase text-stone-400 block mb-2 border-b border-stone-850 pb-1.5 flex items-center gap-1.5">
+                  <Crosshair className="w-3.5 h-3.5 text-amber-500" /> Histórico de Batalhas
+                </span>
+                <div className="space-y-1.5 max-h-[120px] overflow-y-auto pr-1">
+                  {battleHistory.map((b, i) => (
+                    <div key={i} className="flex items-center justify-between text-[10px] font-mono border-b border-stone-850/50 pb-1 last:border-0 last:pb-0">
+                      <span className={b.winner === 'attacker' ? 'text-emerald-400' : 'text-rose-400'}>
+                        {b.winner === 'attacker' ? '▲' : '▼'} T{b.turn} {b.originName} → {b.targetName}
+                      </span>
+                      <span className="text-stone-500 text-[9px]">-{b.attackerLosses.infantry}Inf/{b.attackerLosses.tanks}Blin</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="bg-stone-900 border border-stone-800 rounded-xl p-5 shadow-lg flex flex-col justify-between h-[230px] overflow-hidden">
               <span className="font-bold text-sm tracking-wider uppercase text-stone-300 block mb-2 border-b border-stone-850 pb-1.5">Massa de Dados / Relatório de Crises</span>
               <div className="flex-1 overflow-y-auto space-y-1.5 pr-2 custom-scrollbar font-mono text-[11px] leading-relaxed">
@@ -3056,6 +3149,41 @@ export default function App() {
         <span>© 2026/2027 Fronteira do Prata - Paradox Mod • Paradox Sim</span>
         <span>Apoio de Satélite do Operações de IA Ativado</span>
       </footer>
+
+      {/* MODAL DE CONFIRMAÇÃO DE ATAQUE */}
+      {pendingAttack && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+          <div className="bg-stone-900 border border-rose-700/60 max-w-sm w-full rounded-xl overflow-hidden shadow-2xl">
+            <div className="p-4 bg-rose-950 border-b border-rose-800 flex items-center space-x-2">
+              <AlertTriangle className="w-5 h-5 text-rose-400" />
+              <span className="font-black tracking-wider uppercase text-stone-100 text-sm">Confirmar Assalto Militar</span>
+            </div>
+            <div className="p-6 space-y-3 text-sm text-stone-300">
+              <p>Você está prestes a atacar <strong className="text-rose-400 uppercase">{pendingAttack.targetName}</strong> a partir de <strong className="text-emerald-400">{pendingAttack.originName}</strong>.</p>
+              <p className="text-stone-400 text-xs">Infantaria: {pendingAttack.inf} divisões &nbsp;|&nbsp; Blindados: {pendingAttack.tnk} divisões</p>
+              <p className="text-stone-500 text-xs italic">Esta ação é irreversível. Confirme apenas se tiver certeza da ordem.</p>
+            </div>
+            <div className="p-4 bg-stone-950 border-t border-stone-850 flex gap-3 justify-end">
+              <button
+                onClick={() => setPendingAttack(null)}
+                className="px-4 py-2 bg-stone-800 hover:bg-stone-700 text-stone-300 font-bold uppercase text-xs rounded cursor-pointer transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  const { inf, tnk } = pendingAttack;
+                  setPendingAttack(null);
+                  executeMilitaryOrder(inf, 0, tnk);
+                }}
+                className="px-4 py-2 bg-rose-700 hover:bg-rose-600 text-stone-100 font-bold uppercase text-xs rounded cursor-pointer transition"
+              >
+                Confirmar Ataque
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL DE BUBBLE COMBATE (RELATÓRIO ANIMADO DE DISPUTA) */}
       {combatDetailsModal?.visible && (
