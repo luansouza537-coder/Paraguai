@@ -81,6 +81,8 @@ export interface GameState {
   weather?: 'clear' | 'rain' | 'mud' | 'fog';
   customNames?: Record<string, string>;
   unlockedAchievements?: string[];
+  warTaxRate?: 0 | 1 | 2 | 3; // 0=normal, 1=leve, 2=pesado, 3=guerra total
+  aviation?: number;           // esquadrões de aviação (ativo nacional)
 }
 
 export const UNIT_COSTS: Record<MilitaryUnitType, ResourceState> = {
@@ -88,6 +90,22 @@ export const UNIT_COSTS: Record<MilitaryUnitType, ResourceState> = {
   artillery: { money: 20, steel: 8, oil: 2, food: 2 },
   tanks: { money: 40, steel: 15, oil: 6, food: 1 },
 };
+
+// Manutenção por turno (dinheiro) de edifícios e tropas
+export const BUILDING_MAINTENANCE: Record<BuildingType, number> = {
+  industrial: 5,   // por nível
+  refinery:   4,
+  fortress:   2,
+  logistics:  3,
+};
+
+export const TROOP_MAINTENANCE = {
+  infantry:  (n: number) => Math.floor(n / 3),       // 1 moeda a cada 3 soldados
+  artillery: (n: number) => n * 2,
+  tanks:     (n: number) => n * 3,
+};
+
+export const MAX_BUILDING_LEVEL = 3;
 
 export const BUILDING_COSTS: Record<BuildingType, ResourceState> = {
   industrial: { money: 50, steel: 10, oil: 5, food: 5 },

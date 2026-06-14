@@ -35,7 +35,7 @@ import {
   FolderOpen
 } from 'lucide-react';
 import { INITIAL_PROVINCES } from './provincesData';
-import { GameState, Country, Province, GameEvent, EventChoice, UNIT_COSTS, BUILDING_COSTS, UNIT_STATS, MilitaryUnitType, BuildingType } from './types';
+import { GameState, Country, Province, GameEvent, EventChoice, UNIT_COSTS, BUILDING_COSTS, UNIT_STATS, BUILDING_MAINTENANCE, TROOP_MAINTENANCE, MAX_BUILDING_LEVEL, MilitaryUnitType, BuildingType } from './types';
 import { simulateCombat } from './utils/combat';
 import { PREDEFINED_EVENTS } from './predefinedEvents';
 import { RealSatelliteMap } from './components/RealSatelliteMap';
@@ -73,6 +73,8 @@ export default function App() {
     weather: 'clear',
     customNames: {},
     unlockedAchievements: [],
+    warTaxRate: 0,
+    aviation: 0,
   });
 
   const SAVE_KEY = 'fronteira_prata_save';
@@ -559,6 +561,13 @@ export default function App() {
 
     const cost = BUILDING_COSTS[type];
 
+    // Limite máximo por edifício
+    if (prov.buildings[type] >= MAX_BUILDING_LEVEL) {
+      addLog(`[Construção] Nível máximo (${MAX_BUILDING_LEVEL}) de ${type.toUpperCase()} já atingido em ${prov.name}.`);
+      playSynthSound('error');
+      return;
+    }
+
     // Verificar abundância
     if (
       gameState.resources.money < cost.money ||
@@ -692,21 +701,33 @@ export default function App() {
       const defenderSupplied = checkIsSupplied(destId, destination.controller);
 
       const foodStarved = gameState.resources.food < 20;
+      // Morale multiplier (food + stability)
+      const morale = Math.max(20, Math.min(100, 50 + (gameState.resources.food - 30) * 1.2 + (gameState.stability - 50) * 0.4));
+      const moraleMult = morale < 40 ? 0.75 : morale < 60 ? 0.9 : 1.0;
+      const effectiveMult = foodStarved ? Math.min(moraleMult, 0.8) : moraleMult;
       const combatUnits = {
-        infantry: foodStarved ? Math.round(sendInfantry * 0.8) : sendInfantry,
-        artillery: foodStarved ? Math.round(sendArtillery * 0.8) : sendArtillery,
-        tanks: foodStarved ? Math.round(sendTanks * 0.8) : sendTanks,
+        infantry:  Math.round(sendInfantry  * effectiveMult),
+        artillery: Math.round(sendArtillery * effectiveMult),
+        tanks:     Math.round(sendTanks     * effectiveMult),
       };
-      if (foodStarved) {
-        addLog('[Moral] Escassez de alimentos: tropas combatem com -20% de eficácia ofensiva.');
+      if (effectiveMult < 1.0) {
+        addLog(`[Moral] Tropas combatem com ${Math.round(effectiveMult * 100)}% de eficácia (moral ${Math.round(morale)}%).`);
+      }
+
+      // Bônus de aviação: cada esquadrão reduz 6% da defesa inimiga (máx 30%)
+      const aviationSquads = gameState.aviation ?? 0;
+      const aviationDebuff = Math.min(0.30, aviationSquads * 0.06);
+      if (aviationSquads > 0) {
+        addLog(`[Aviação] ${aviationSquads} esquadrão(ões) de caça em suporte tático (-${Math.round(aviationDebuff * 100)}% defesa inimiga).`);
       }
 
       const result = simulateCombat(
-        origin, 
-        destination, 
-        combatUnits, 
-        defenderSupplied, 
-        attackerSupplied
+        origin,
+        destination,
+        combatUnits,
+        defenderSupplied,
+        attackerSupplied,
+        aviationDebuff
       );
 
       // Aplicar perdas e troca de controle se o atacante vencer
@@ -937,6 +958,47 @@ export default function App() {
     playSynthSound('success');
   };
 
+  // Recrutar esquadrão de aviação (ativo nacional)
+  const recruitAviation = () => {
+    const COST = { money: 55, steel: 10, oil: 12 };
+    if (gameState.resources.money < COST.money || gameState.resources.steel < COST.steel || gameState.resources.oil < COST.oil) {
+      addLog('[Aviação] Recursos insuficientes para recrutar esquadrão aéreo (R$55B, 10Aço, 12 Petróleo).');
+      playSynthSound('error');
+      return;
+    }
+    setGameState(prev => ({
+      ...prev,
+      aviation: (prev.aviation ?? 0) + 1,
+      resources: {
+        ...prev.resources,
+        money: prev.resources.money - COST.money,
+        steel: prev.resources.steel - COST.steel,
+        oil: prev.resources.oil - COST.oil,
+      },
+      logs: [`[Aviação] Novo esquadrão de caças recrutado. Total: ${(prev.aviation ?? 0) + 1} esquadrão(ões).`, ...prev.logs],
+    }));
+    playSynthSound('success');
+  };
+
+  // Trocar recursos no mercado de guerra
+  const tradResources = (give: keyof typeof gameState.resources, giveAmt: number, receive: keyof typeof gameState.resources, receiveAmt: number) => {
+    if (gameState.resources[give] < giveAmt) {
+      addLog(`[Comércio] Recursos insuficientes para essa troca.`);
+      playSynthSound('error');
+      return;
+    }
+    setGameState(prev => ({
+      ...prev,
+      resources: {
+        ...prev.resources,
+        [give]: prev.resources[give] - giveAmt,
+        [receive]: prev.resources[receive] + receiveAmt,
+      },
+      logs: [`[Comércio] Trocados ${giveAmt} ${String(give)} por ${receiveAmt} ${String(receive)} no mercado de guerra.`, ...prev.logs],
+    }));
+    playSynthSound('success');
+  };
+
   // Melhoria 14: Nome de Base Customizado
   const handleRenameProvince = (provId: string, newName: string) => {
     if (!newName.trim()) return;
@@ -1052,6 +1114,11 @@ export default function App() {
         }
       });
 
+      // Bônus de imposto de guerra sobre a renda
+      const taxRate = prev.warTaxRate ?? 0;
+      const taxBonus = [1.0, 1.2, 1.4, 1.6][taxRate];
+      baseMoney *= taxBonus;
+
       // Modificador de Estabilidade sobre a produção econômica
       const stabilityMultiplier = 0.5 + (prev.stability / 200); // 0.5 a 1.0
       const finalMoneyGained = Math.round(baseMoney * stabilityMultiplier);
@@ -1086,6 +1153,49 @@ export default function App() {
       updatedResources.oil = Math.max(0, updatedResources.oil - oilConsumption);
       updatedResources.food = Math.max(0, updatedResources.food - foodConsumption);
 
+      // Manutenção de edifícios (dinheiro/turno por nível)
+      let buildingMaintenance = 0;
+      (Object.values(prev.provinces) as Province[]).forEach(prov => {
+        if (prov.controller === player) {
+          buildingMaintenance += prov.buildings.industrial * BUILDING_MAINTENANCE.industrial;
+          buildingMaintenance += prov.buildings.refinery   * BUILDING_MAINTENANCE.refinery;
+          buildingMaintenance += prov.buildings.fortress   * BUILDING_MAINTENANCE.fortress;
+          buildingMaintenance += prov.buildings.logistics  * BUILDING_MAINTENANCE.logistics;
+        }
+      });
+
+      // Manutenção de tropas (dinheiro/turno)
+      const troopMaintenance =
+        TROOP_MAINTENANCE.infantry(totalInfantry) +
+        TROOP_MAINTENANCE.artillery(totalArtillery) +
+        TROOP_MAINTENANCE.tanks(totalTanks) +
+        (prev.aviation ?? 0) * 5;  // R$5B/turno por esquadrão aéreo
+
+      const totalMaintenance = buildingMaintenance + troopMaintenance;
+      updatedResources.money = updatedResources.money - totalMaintenance;
+
+      // Penalidade de déficit (attritionLogs é declarado logo abaixo, adicionamos após)
+      let deficitPenalty = { popularity: 0, stability: 0 };
+      let hasDeficit = false;
+      if (updatedResources.money < 0) {
+        deficitPenalty = { popularity: -8, stability: -5 };
+        updatedResources.money = 0;
+        hasDeficit = true;
+      }
+
+      // Penalidades do imposto de guerra sobre popularidade/estabilidade
+      const taxPenalties = [
+        { popularity: 0, stability: 0 },
+        { popularity: -5, stability: 0 },
+        { popularity: -12, stability: -5 },
+        { popularity: -20, stability: -10 },
+      ][taxRate];
+
+      // Moral — derivado de comida e estabilidade (0–100)
+      const morale = Math.max(20, Math.min(100,
+        50 + (updatedResources.food - 30) * 1.2 + (prev.stability - 50) * 0.4
+      ));
+
       // 2. ATRIÇÃO E LOGÍSTICA DE FRONTEIRA (PROVÍNCIAS ISOLADAS DE SUPRIMENTOS)
       const updatedProvinces: Record<string, Province> = {};
       Object.entries(prev.provinces).forEach(([id, p]) => {
@@ -1093,6 +1203,9 @@ export default function App() {
         updatedProvinces[id] = { ...prov, armies: { ...prov.armies }, buildings: { ...prov.buildings }, resources: { ...prov.resources } };
       });
       let attritionLogs: string[] = [];
+      if (hasDeficit) {
+        attritionLogs.push('[DÉFICIT FISCAL] Reservas esgotadas! Cortes emergenciais afetam moral e estabilidade.');
+      }
 
       Object.keys(updatedProvinces).forEach(id => {
         const prov = updatedProvinces[id];
@@ -1257,11 +1370,15 @@ export default function App() {
         finalStability = Math.max(0, finalStability - 5);
         attritionLogs.push('[Crise Social] Reservas de alimentos baixas estão corroendo nossa estabilidade interna!');
       }
+      // Aplica penalidades de déficit e imposto de guerra
+      finalStability = Math.max(0, Math.min(100, finalStability + deficitPenalty.stability + taxPenalties.stability));
+      const finalPopularity = Math.max(0, Math.min(100, prev.popularity + deficitPenalty.popularity + taxPenalties.popularity));
 
       // Balanço de logs
       const endTurnSummary = [
         `--- INÍCIO DO TURNO ${nextTurn} ---`,
-        `Produção: +R$ ${finalMoneyGained}B, +${finalSteelGained}T de Aço, +${finalOilGained} bbl de Petróleo, +${finalFoodGained}T de Alimentos.`,
+        `Produção: +R$ ${finalMoneyGained}B (×${taxBonus.toFixed(1)} imposto), +${finalSteelGained}T Aço, +${finalOilGained}bbl Petróleo, +${finalFoodGained}T Alimentos.`,
+        `Manutenção: -R$${totalMaintenance}B (edifícios: ${buildingMaintenance}B, tropas: ${troopMaintenance}B). Moral: ${Math.round(morale)}%.`,
         `Consumo Militar: Alimento: -${foodConsumption}T, Petróleo: -${oilConsumption} bbl.`,
         ...aiTensionLogs,
         ...attritionLogs,
@@ -1291,16 +1408,17 @@ export default function App() {
         ...prev,
         turn: nextTurn,
         resources: updatedResources,
+        popularity: finalPopularity,
         stability: finalStability,
         provinces: updatedProvinces,
         gamePhase: phase,
         logs: endTurnSummary,
         selectedProvinceId: null,
         targetProvinceId: null,
-        activeEvent: null, // Limpar para novo evento se der certo
+        activeEvent: null,
         weather: nextWeather,
         foreignAidCooldown: nextCooldown,
-        unlockedAchievements: updatedAchs
+        unlockedAchievements: updatedAchs,
       };
     });
     playSynthSound('nextTurn');
@@ -1466,23 +1584,44 @@ export default function App() {
               </div>
             </div>
 
-            {/* Popularidade e Estabilidade */}
+            {/* Popularidade, Estabilidade, Moral e Aviação */}
             <div className="flex items-center space-x-3 bg-stone-900 border border-stone-850 p-2 rounded-lg">
-              <div className="flex items-center space-x-1.5" title="Aprovação Civil: Baixa popularidade cassa mandato!">
+              <div className="flex items-center space-x-1.5" title="Aprovação Civil">
                 <Vote className="w-3.5 h-3.5 text-rose-500" />
                 <div>
                   <div className="text-[9px] text-stone-500 leading-none">APROVAÇÃO</div>
                   <span className="text-xs font-bold text-rose-400">{gameState.popularity}%</span>
                 </div>
               </div>
-
-              <div className="flex items-center space-x-1.5" title="Estabilidade Militar: Fornece bônus de produção se expressiva.">
+              <div className="flex items-center space-x-1.5" title="Estabilidade">
                 <Shield className="w-3.5 h-3.5 text-emerald-400" />
                 <div>
                   <div className="text-[9px] text-stone-500 leading-none">ORDEM</div>
                   <span className="text-xs font-bold text-emerald-400">{gameState.stability}%</span>
                 </div>
               </div>
+              {(() => {
+                const morale = Math.max(20, Math.min(100, 50 + (gameState.resources.food - 30) * 1.2 + (gameState.stability - 50) * 0.4));
+                const moraleColor = morale >= 70 ? 'text-emerald-400' : morale >= 45 ? 'text-amber-400' : 'text-rose-400';
+                return (
+                  <div className="flex items-center space-x-1.5" title="Moral das tropas (afeta eficácia em combate)">
+                    <Zap className="w-3.5 h-3.5 text-amber-400" />
+                    <div>
+                      <div className="text-[9px] text-stone-500 leading-none">MORAL</div>
+                      <span className={`text-xs font-bold ${moraleColor}`}>{Math.round(morale)}%</span>
+                    </div>
+                  </div>
+                );
+              })()}
+              {(gameState.aviation ?? 0) > 0 && (
+                <div className="flex items-center space-x-1.5" title="Esquadrões de aviação disponíveis">
+                  <Cloud className="w-3.5 h-3.5 text-sky-400" />
+                  <div>
+                    <div className="text-[9px] text-stone-500 leading-none">AVIAÇÃO</div>
+                    <span className="text-xs font-bold text-sky-400">{gameState.aviation}✈</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Save / Load */}
@@ -2247,6 +2386,87 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* IMPOSTO DE GUERRA */}
+                <div className="bg-stone-950 p-5 rounded-xl border border-amber-900/40 space-y-3">
+                  <h4 className="text-sm font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+                    <Coins className="w-4 h-4" /> Política Fiscal de Guerra
+                  </h4>
+                  <p className="text-xs text-stone-400">Eleve a taxação para aumentar renda, mas sacrifique popularidade e estabilidade.</p>
+                  <div className="grid grid-cols-4 gap-2">
+                    {([
+                      { level: 0 as const, label: 'Normal', bonus: '+0%', pen: '—', color: 'border-stone-700 text-stone-300' },
+                      { level: 1 as const, label: 'Leve',   bonus: '+20%', pen: '-5 apr/turno', color: 'border-amber-700 text-amber-300' },
+                      { level: 2 as const, label: 'Pesado', bonus: '+40%', pen: '-12 apr, -5 est', color: 'border-orange-700 text-orange-300' },
+                      { level: 3 as const, label: 'Total',  bonus: '+60%', pen: '-20 apr, -10 est', color: 'border-rose-700 text-rose-300' },
+                    ] as const).map(({ level, label, bonus, pen, color }) => (
+                      <button
+                        key={level}
+                        onClick={() => setGameState(prev => ({ ...prev, warTaxRate: level }))}
+                        className={`p-2 rounded border text-center text-xs font-mono cursor-pointer transition ${(gameState.warTaxRate ?? 0) === level ? color + ' bg-stone-900' : 'border-stone-850 text-stone-500 hover:border-stone-700'}`}
+                      >
+                        <div className="font-bold">{label}</div>
+                        <div className="text-emerald-400 text-[10px]">{bonus}</div>
+                        <div className="text-rose-400 text-[9px] leading-tight mt-0.5">{pen}</div>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] font-mono text-stone-500">Nível atual: <strong className="text-amber-400">{['Normal', 'Leve', 'Pesado', 'Total'][gameState.warTaxRate ?? 0]}</strong></p>
+                </div>
+
+                {/* AVIAÇÃO NACIONAL */}
+                <div className="bg-stone-950 p-5 rounded-xl border border-sky-900/40 space-y-3">
+                  <h4 className="text-sm font-bold uppercase tracking-wider text-sky-400 flex items-center gap-2">
+                    <Cloud className="w-4 h-4" /> Força Aérea Nacional
+                  </h4>
+                  <p className="text-xs text-stone-400">Esquadrões de caças reduzem 6% da defesa inimiga por batalha (máx 30%). Custo: R$55B + 10Aço + 12Petróleo. Manutenção: R$5B/turno/esquadrão.</p>
+                  <div className="flex items-center justify-between">
+                    <div className="font-mono text-sm">
+                      <span className="text-stone-400">Esquadrões ativos: </span>
+                      <span className="text-sky-400 font-bold">{gameState.aviation ?? 0} ✈</span>
+                    </div>
+                    <button
+                      onClick={recruitAviation}
+                      className="px-4 py-2 bg-sky-800 hover:bg-sky-700 border border-sky-600 text-stone-100 font-bold text-xs rounded cursor-pointer transition"
+                    >
+                      + Recrutar Esquadrão
+                    </button>
+                  </div>
+                  {(gameState.aviation ?? 0) > 0 && (
+                    <div className="text-[10px] font-mono text-stone-500">
+                      Bônus atual: <span className="text-sky-400">-{Math.round(Math.min(0.30, (gameState.aviation ?? 0) * 0.06) * 100)}%</span> defesa inimiga em cada ataque
+                    </div>
+                  )}
+                </div>
+
+                {/* MERCADO DE GUERRA */}
+                <div className="bg-stone-950 p-5 rounded-xl border border-stone-800 space-y-3">
+                  <h4 className="text-sm font-bold uppercase tracking-wider text-stone-300 flex items-center gap-2">
+                    <Briefcase className="w-4 h-4 text-stone-400" /> Mercado de Recursos de Guerra
+                  </h4>
+                  <p className="text-xs text-stone-400">Troque excedentes por recursos críticos. Preços refletem urgência de guerra.</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 font-mono text-xs">
+                    {([
+                      { label: 'Vender 20 Comida', give: 'food' as const, giveAmt: 20, receive: 'money' as const, receiveAmt: 15, cond: gameState.resources.food > 30, condLabel: 'Requer >30 Comida' },
+                      { label: 'Vender 10 Aço', give: 'steel' as const, giveAmt: 10, receive: 'money' as const, receiveAmt: 12, cond: gameState.resources.steel > 20, condLabel: 'Requer >20 Aço' },
+                      { label: 'Vender 15 Petróleo', give: 'oil' as const, giveAmt: 15, receive: 'money' as const, receiveAmt: 20, cond: gameState.resources.oil > 25, condLabel: 'Requer >25 Petróleo' },
+                      { label: 'Comprar 20 Comida', give: 'money' as const, giveAmt: 18, receive: 'food' as const, receiveAmt: 20, cond: gameState.resources.money > 20, condLabel: 'Requer >R$20B' },
+                      { label: 'Comprar 10 Aço', give: 'money' as const, giveAmt: 15, receive: 'steel' as const, receiveAmt: 10, cond: gameState.resources.money > 15, condLabel: 'Requer >R$15B' },
+                      { label: 'Comprar 15 Petróleo', give: 'money' as const, giveAmt: 20, receive: 'oil' as const, receiveAmt: 15, cond: gameState.resources.money > 20, condLabel: 'Requer >R$20B' },
+                    ]).map(({ label, give, giveAmt, receive, receiveAmt, cond, condLabel }) => (
+                      <button
+                        key={label}
+                        onClick={() => tradResources(give, giveAmt, receive, receiveAmt)}
+                        disabled={!cond}
+                        title={!cond ? condLabel : ''}
+                        className="flex justify-between items-center p-2.5 bg-stone-900 border border-stone-800 hover:border-amber-600/50 rounded cursor-pointer transition disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <span className="text-stone-300">{label}</span>
+                        <span className="text-emerald-400">→ +{receiveAmt} {receive}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 {/* Resumo de Estruturas do Império (Melhoria 18) */}
                 <div className="bg-stone-950 p-5 rounded-xl border border-stone-850 space-y-4">
                   <h4 className="text-sm font-bold uppercase tracking-wider text-stone-300">
@@ -2877,7 +3097,7 @@ export default function App() {
 
                         </div>
                         <div className="text-[9px] text-stone-400 mt-1 text-center leading-normal">
-                          Custos: Infantaria (R$ 10B | 2 Aço), Artilharia (R$ 20B | 8 Aço), Tanque (R$ 40B | 15 Aço | 10 Petróleo).
+                          Custos: Infantaria (R$10B|2Aço) — Artilharia (R$20B|8Aço) — Tanque (R$40B|15Aço|6Óleo). Máx edifícios: {MAX_BUILDING_LEVEL} níveis.
                         </div>
 
                         {/* Painel de Desmobilização Militar (Melhoria 6) */}
