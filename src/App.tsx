@@ -30,7 +30,9 @@ import {
   Search,
   Download,
   Cloud,
-  Edit3
+  Edit3,
+  Save,
+  FolderOpen
 } from 'lucide-react';
 import { INITIAL_PROVINCES } from './provincesData';
 import { GameState, Country, Province, GameEvent, EventChoice, UNIT_COSTS, BUILDING_COSTS, UNIT_STATS, MilitaryUnitType, BuildingType } from './types';
@@ -72,6 +74,39 @@ export default function App() {
     customNames: {},
     unlockedAchievements: [],
   });
+
+  const SAVE_KEY = 'fronteira_prata_save';
+  const [hasSave, setHasSave] = useState<boolean>(() => !!localStorage.getItem(SAVE_KEY));
+  const [saveNotification, setSaveNotification] = useState<string | null>(null);
+
+  const saveGame = () => {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(gameState));
+    setHasSave(true);
+    setSaveNotification('Partida salva!');
+    setTimeout(() => setSaveNotification(null), 2000);
+  };
+
+  const loadGame = () => {
+    const saved = localStorage.getItem(SAVE_KEY);
+    if (!saved) return;
+    try {
+      const state: GameState = JSON.parse(saved);
+      setGameState(state);
+      setSaveNotification('Partida carregada!');
+      setTimeout(() => setSaveNotification(null), 2000);
+    } catch {
+      setSaveNotification('Erro ao carregar save.');
+      setTimeout(() => setSaveNotification(null), 2000);
+    }
+  };
+
+  // Auto-save ao final de cada turno
+  useEffect(() => {
+    if (gameState.gamePhase === 'playing' && gameState.turn > 1) {
+      localStorage.setItem(SAVE_KEY, JSON.stringify(gameState));
+      setHasSave(true);
+    }
+  }, [gameState.turn]);
 
   // Som tático simulado via Web Audio API (Melhoria 3)
   const playSynthSound = (type: 'click' | 'success' | 'error' | 'combat' | 'nextTurn') => {
@@ -1394,6 +1429,30 @@ export default function App() {
               </div>
             </div>
 
+            {/* Save / Load */}
+            <div className="flex gap-1.5 bg-stone-950 p-1.5 rounded-lg border border-stone-850 relative">
+              <button
+                onClick={saveGame}
+                className="p-1.5 border border-stone-800 hover:border-amber-600/50 rounded bg-stone-900 text-stone-300 hover:text-amber-400 cursor-pointer transition flex items-center justify-center"
+                title="Salvar Agora"
+              >
+                <Save className="w-4 h-4" />
+              </button>
+              <button
+                onClick={loadGame}
+                disabled={!hasSave}
+                className="p-1.5 border border-stone-800 hover:border-amber-600/50 rounded bg-stone-900 text-stone-300 hover:text-amber-400 cursor-pointer transition flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Carregar Save"
+              >
+                <FolderOpen className="w-4 h-4" />
+              </button>
+              {saveNotification && (
+                <div className="absolute -top-8 left-0 bg-stone-800 border border-stone-700 text-stone-100 text-[10px] font-mono px-2 py-1 rounded whitespace-nowrap shadow-lg">
+                  {saveNotification}
+                </div>
+              )}
+            </div>
+
             {/* Mudo e Auto Avanço Tático (Melhorias 1, 14, 20) */}
             <div className="flex gap-1.5 bg-stone-950 p-1.5 rounded-lg border border-stone-850">
               {/* Botão de Som Mudo */}
@@ -1520,6 +1579,21 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            {hasSave && (
+              <div className="border-t border-stone-800/80 pt-6">
+                <button
+                  onClick={loadGame}
+                  className="w-full py-3 bg-stone-800 hover:bg-stone-700 border border-stone-600 hover:border-amber-600/60 text-stone-100 font-bold rounded-lg uppercase tracking-wider text-sm transition-all flex items-center justify-center space-x-2"
+                >
+                  <FolderOpen className="w-4 h-4 text-amber-400" />
+                  <span>Continuar Partida</span>
+                </button>
+                <p className="text-[10px] font-mono text-stone-500 mt-2 text-center">
+                  Retoma o último save automático
+                </p>
+              </div>
+            )}
 
             <div className="text-xs font-mono text-stone-500 border-t border-stone-800/80 pt-6">
               Grand Strategy Game desenvolvido com integração ativa de Inteligência Artificial para roteiros e táticas de campo.
