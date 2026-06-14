@@ -82,6 +82,8 @@ export default function App() {
       const ctx = new AudioContext();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
+      // Fecha o contexto após o som terminar para liberar recursos nativos de áudio
+      osc.onended = () => { ctx.close().catch(() => {}); };
       osc.connect(gain);
       gain.connect(ctx.destination);
 
@@ -341,6 +343,8 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json();
+        const isValid = data && typeof data.title === 'string' && Array.isArray(data.choices) && data.choices.length > 0;
+        if (!isValid) throw new Error('Resposta da API com estrutura inválida');
         setGameState(prev => ({
           ...prev,
           activeEvent: data,
@@ -2374,7 +2378,7 @@ export default function App() {
                   </p>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3">
-                    {gameState.activeEvent.choices.map((choice, idx) => {
+                    {(gameState.activeEvent.choices ?? []).map((choice, idx) => {
                       return (
                         <button
                           key={idx}
