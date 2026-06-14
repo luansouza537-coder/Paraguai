@@ -45,6 +45,19 @@ export function simulateCombat(
     log.push(`Suporte aéreo reduziu poder defensivo em ${Math.round(aviationDebuff * 100)}%.`);
   }
 
+  // Terrain modifiers
+  const terrain = defenderProv.terrain ?? 'plains';
+  if (terrain === 'jungle') {
+    defPower *= 1.25;
+    log.push(`Terreno de Selva: defesa reforçada em +25%.`);
+  } else if (terrain === 'urban') {
+    defPower *= 1.15;
+    log.push(`Combate Urbano: defesa reforçada em +15%.`);
+  } else if (terrain === 'chaco') {
+    attPower *= 0.85;
+    log.push(`Terreno do Chaco: ataque penalizado em -15% (terreno inóspito).`);
+  }
+
   // Fortress modifier for the defender (reduces incoming damage)
   const fortLevel = defenderProv.buildings.fortress || 0;
   const fortMitigation = Math.max(0.4, 1 - fortLevel * 0.15); // Each fortress reduces incoming damage by 15% (max 60%)

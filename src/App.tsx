@@ -35,7 +35,7 @@ import {
   FolderOpen
 } from 'lucide-react';
 import { INITIAL_PROVINCES } from './provincesData';
-import { GameState, Country, Province, GameEvent, EventChoice, UNIT_COSTS, BUILDING_COSTS, UNIT_STATS, BUILDING_MAINTENANCE, TROOP_MAINTENANCE, MAX_BUILDING_LEVEL, MilitaryUnitType, BuildingType } from './types';
+import { GameState, Country, Province, GameEvent, EventChoice, UNIT_COSTS, BUILDING_COSTS, UNIT_STATS, BUILDING_MAINTENANCE, TROOP_MAINTENANCE, MAX_BUILDING_LEVEL, MilitaryUnitType, BuildingType, ResourceState } from './types';
 import { simulateCombat } from './utils/combat';
 import { PREDEFINED_EVENTS } from './predefinedEvents';
 import { RealSatelliteMap } from './components/RealSatelliteMap';
@@ -561,8 +561,16 @@ export default function App() {
 
     const cost = BUILDING_COSTS[type];
 
+    // Restrição geográfica: hidroelétrica exige rio
+    if (type === 'hydroelectric' && !prov.hasRiver) {
+      addLog(`[Construção] Hidroelétrica requer rio navegável. ${prov.name} não possui recursos hídricos suficientes.`);
+      playSynthSound('error');
+      return;
+    }
+
     // Limite máximo por edifício
-    if (prov.buildings[type] >= MAX_BUILDING_LEVEL) {
+    const currentLevel = (prov.buildings[type] ?? 0);
+    if (currentLevel >= MAX_BUILDING_LEVEL) {
       addLog(`[Construção] Nível máximo (${MAX_BUILDING_LEVEL}) de ${type.toUpperCase()} já atingido em ${prov.name}.`);
       playSynthSound('error');
       return;
@@ -586,7 +594,7 @@ export default function App() {
       
       targetProv.buildings = {
         ...targetProv.buildings,
-        [type]: targetProv.buildings[type] + 1
+        [type]: (targetProv.buildings[type] ?? 0) + 1
       };
       
       updatedProvinces[provId] = targetProv;
@@ -961,6 +969,15 @@ export default function App() {
   // Recrutar esquadrão de aviação (ativo nacional)
   const recruitAviation = () => {
     const COST = { money: 55, steel: 10, oil: 12 };
+    // Requer ao menos uma base aérea construída
+    const hasAirbase = Object.values(gameState.provinces).some(
+      (p: any) => p.controller === gameState.playerCountry && (p.buildings.airbase ?? 0) > 0
+    );
+    if (!hasAirbase) {
+      addLog('[Aviação] Pré-requisito não atingido: construa uma Base Aérea em qualquer província antes de recrutar esquadrões.');
+      playSynthSound('error');
+      return;
+    }
     if (gameState.resources.money < COST.money || gameState.resources.steel < COST.steel || gameState.resources.oil < COST.oil) {
       addLog('[Aviação] Recursos insuficientes para recrutar esquadrão aéreo (R$55B, 10Aço, 12 Petróleo).');
       playSynthSound('error');
@@ -1029,6 +1046,7 @@ export default function App() {
     let nextSteel = 5;
     let nextOil = 5;
     let nextFood = 15;
+    let nextEnergia = 0;
     const player = gameState.playerCountry;
     Object.values(gameState.provinces).forEach((prov: any) => {
       if (prov.controller === player) {
@@ -1036,18 +1054,27 @@ export default function App() {
         nextSteel += prov.resources.steel * 0.12;
         nextOil += prov.resources.oil * 0.12;
         nextFood += prov.resources.food * 0.15;
+        if (prov.onAquifer) nextFood += 4;
+        const logBonus = prov.hasRiver ? 1.2 : 1.0;
+        nextFood += prov.buildings.logistics * 4 * logBonus;
         nextMoney += prov.buildings.industrial * 12;
         nextSteel += prov.buildings.industrial * 5;
         nextOil += prov.buildings.refinery * 8;
-        nextFood += prov.buildings.logistics * 4;
+        nextEnergia += (prov.buildings.hydroelectric ?? 0) * 5;
+        const ethanolLvl = prov.buildings.ethanolRefinery ?? 0;
+        if (ethanolLvl > 0) { nextFood -= ethanolLvl * 4; nextOil += ethanolLvl * 3; }
       }
     });
+    const energyBonus = 1 + Math.floor(nextEnergia / 5) * 0.08;
+    nextMoney *= energyBonus;
+    nextSteel *= energyBonus;
     const stabilityMultiplier = 0.5 + (gameState.stability / 200);
     return {
       money: Math.round(nextMoney * stabilityMultiplier),
       steel: Math.round(nextSteel),
-      oil: Math.round(nextOil),
-      food: Math.round(nextFood * stabilityMultiplier)
+      oil: Math.round(Math.max(0, nextOil)),
+      food: Math.round(Math.max(0, nextFood * stabilityMultiplier)),
+      energia: Math.round(nextEnergia),
     };
   };
 
@@ -1097,6 +1124,7 @@ export default function App() {
       let baseSteel = 5;
       let baseOil = 5;
       let baseFood = 15;
+      let baseEnergia = 0;
 
       (Object.values(prev.provinces) as Province[]).forEach(prov => {
         if (prov.controller === player) {
@@ -1106,13 +1134,39 @@ export default function App() {
           baseOil += prov.resources.oil * 0.12;
           baseFood += prov.resources.food * 0.15;
 
-          // Produção adicional das estruturas construídas
+          // Bônus de Aquífero Guarani: +4 alimento/turno
+          if (prov.onAquifer) {
+            baseFood += 4;
+          }
+
+          // Bônus de rio em logística: +20% alimento dos depósitos logísticos
+          const logBonus = prov.hasRiver ? 1.2 : 1.0;
+          baseFood += (prov.buildings.logistics * 4 * logBonus);
+
+          // Energia gerada por hidroelétricas (5 MW por nível)
+          const hydroLevel = prov.buildings.hydroelectric ?? 0;
+          baseEnergia += hydroLevel * 5;
+
+          // Bônus industrial potencializado por energia disponível (calculado após)
           baseMoney += (prov.buildings.industrial * 12);
           baseSteel += (prov.buildings.industrial * 5);
           baseOil += (prov.buildings.refinery * 8);
-          baseFood += (prov.buildings.logistics * 4);
+
+          // Refinaria de etanol: consome 4 alimento, gera 3 petróleo por nível/turno
+          const ethanolLevel = prov.buildings.ethanolRefinery ?? 0;
+          if (ethanolLevel > 0) {
+            const foodCost = ethanolLevel * 4;
+            const oilGain = ethanolLevel * 3;
+            baseFood -= foodCost;
+            baseOil += oilGain;
+          }
         }
       });
+
+      // Bônus de energia na indústria: +8% dinheiro e aço por cada 5 MW de energia
+      const energyBonus = 1 + Math.floor(baseEnergia / 5) * 0.08;
+      baseMoney *= energyBonus;
+      baseSteel *= energyBonus;
 
       // Bônus de imposto de guerra sobre a renda
       const taxRate = prev.warTaxRate ?? 0;
@@ -1123,14 +1177,16 @@ export default function App() {
       const stabilityMultiplier = 0.5 + (prev.stability / 200); // 0.5 a 1.0
       const finalMoneyGained = Math.round(baseMoney * stabilityMultiplier);
       const finalSteelGained = Math.round(baseSteel);
-      const finalOilGained = Math.round(baseOil);
-      const finalFoodGained = Math.round(baseFood * stabilityMultiplier);
+      const finalOilGained = Math.round(Math.max(0, baseOil));
+      const finalFoodGained = Math.round(Math.max(0, baseFood * stabilityMultiplier));
+      const finalEnergiaGained = Math.round(baseEnergia);
 
-      const updatedResources = {
+      const updatedResources: ResourceState = {
         money: prev.resources.money + finalMoneyGained,
         steel: prev.resources.steel + finalSteelGained,
         oil: prev.resources.oil + finalOilGained,
-        food: prev.resources.food + finalFoodGained
+        food: prev.resources.food + finalFoodGained,
+        energia: (prev.resources.energia ?? 0) + finalEnergiaGained,
       };
 
       // Consumo de Suprimento Alimentar e Petróleo pelo Exército Mobilizado
@@ -1161,6 +1217,9 @@ export default function App() {
           buildingMaintenance += prov.buildings.refinery   * BUILDING_MAINTENANCE.refinery;
           buildingMaintenance += prov.buildings.fortress   * BUILDING_MAINTENANCE.fortress;
           buildingMaintenance += prov.buildings.logistics  * BUILDING_MAINTENANCE.logistics;
+          buildingMaintenance += (prov.buildings.hydroelectric   ?? 0) * BUILDING_MAINTENANCE.hydroelectric;
+          buildingMaintenance += (prov.buildings.airbase          ?? 0) * BUILDING_MAINTENANCE.airbase;
+          buildingMaintenance += (prov.buildings.ethanolRefinery  ?? 0) * BUILDING_MAINTENANCE.ethanolRefinery;
         }
       });
 
@@ -1377,7 +1436,7 @@ export default function App() {
       // Balanço de logs
       const endTurnSummary = [
         `--- INÍCIO DO TURNO ${nextTurn} ---`,
-        `Produção: +R$ ${finalMoneyGained}B (×${taxBonus.toFixed(1)} imposto), +${finalSteelGained}T Aço, +${finalOilGained}bbl Petróleo, +${finalFoodGained}T Alimentos.`,
+        `Produção: +R$ ${finalMoneyGained}B (×${taxBonus.toFixed(1)} imposto), +${finalSteelGained}T Aço, +${finalOilGained}bbl Óleo, +${finalFoodGained}T Alimentos${finalEnergiaGained > 0 ? `, +${finalEnergiaGained}⚡ Energia` : ''}.`,
         `Manutenção: -R$${totalMaintenance}B (edifícios: ${buildingMaintenance}B, tropas: ${troopMaintenance}B). Moral: ${Math.round(morale)}%.`,
         `Consumo Militar: Alimento: -${foodConsumption}T, Petróleo: -${oilConsumption} bbl.`,
         ...aiTensionLogs,
@@ -1540,7 +1599,7 @@ export default function App() {
             </div>
 
             {/* Recursos estratégicos com Previsões de Produção Real (Melhoria 3) */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-stone-950/80 p-2 rounded-lg border border-stone-800">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 bg-stone-950/80 p-2 rounded-lg border border-stone-800">
               <div className="flex items-center space-x-2 px-1" title="Dinheiro: Fundos de Campanha nacional.">
                 <Coins className="w-3.5 h-3.5 text-amber-500" />
                 <div>
@@ -1580,6 +1639,15 @@ export default function App() {
                     <span>+{projectedInc.food}</span>
                     <span className="text-rose-500">-{currentConsumptions.food}</span>
                   </div>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2 px-1" title="Energia: Gerada por hidroelétricas. Potencializa indústria.">
+                <Zap className="w-3.5 h-3.5 text-yellow-400" />
+                <div>
+                  <div className="text-[9px] text-stone-500 leading-none">ENERGIA</div>
+                  <span className="font-bold text-yellow-300 text-xs">{gameState.resources.energia ?? 0}⚡</span>
+                  <div className="text-[9px] text-yellow-500 leading-none mt-0.5">MW acum.</div>
                 </div>
               </div>
             </div>
@@ -2925,12 +2993,28 @@ export default function App() {
 
                   {/* Produção detalhada por província */}
                   <div className="bg-stone-950/80 p-3 rounded-lg border border-stone-850 text-xs space-y-2">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between flex-wrap gap-1">
                       <span className="text-[10px] text-stone-500 font-mono uppercase tracking-wider">Produção / Turno</span>
-                      {selectedProvince.controller === gameState.playerCountry
-                        ? <span className="text-[9px] text-emerald-400 font-mono bg-emerald-950/40 px-1.5 py-0.5 rounded">● ATIVA</span>
-                        : <span className="text-[9px] text-rose-400 font-mono bg-rose-950/40 px-1.5 py-0.5 rounded">● INIMIGA</span>
-                      }
+                      <div className="flex gap-1 flex-wrap">
+                        {selectedProvince.controller === gameState.playerCountry
+                          ? <span className="text-[9px] text-emerald-400 font-mono bg-emerald-950/40 px-1.5 py-0.5 rounded">● ATIVA</span>
+                          : <span className="text-[9px] text-rose-400 font-mono bg-rose-950/40 px-1.5 py-0.5 rounded">● INIMIGA</span>
+                        }
+                        {selectedProvince.terrain && selectedProvince.terrain !== 'plains' && (
+                          <span className="text-[9px] font-mono px-1.5 py-0.5 rounded" style={{
+                            color: selectedProvince.terrain === 'jungle' ? '#86efac' : selectedProvince.terrain === 'chaco' ? '#fcd34d' : '#a78bfa',
+                            background: selectedProvince.terrain === 'jungle' ? '#052e16' : selectedProvince.terrain === 'chaco' ? '#422006' : '#2e1065',
+                          }}>
+                            {selectedProvince.terrain === 'jungle' ? '🌿 SELVA' : selectedProvince.terrain === 'chaco' ? '🏜️ CHACO' : '🏙️ URBANO'}
+                          </span>
+                        )}
+                        {selectedProvince.hasRiver && (
+                          <span className="text-[9px] text-blue-300 font-mono bg-blue-950/40 px-1.5 py-0.5 rounded">🌊 RIO</span>
+                        )}
+                        {selectedProvince.onAquifer && (
+                          <span className="text-[9px] text-teal-300 font-mono bg-teal-950/40 px-1.5 py-0.5 rounded">💧 AQUÍFERO</span>
+                        )}
+                      </div>
                     </div>
                     <div className="space-y-1 font-mono text-stone-300">
                       {[
@@ -3183,8 +3267,44 @@ export default function App() {
                           </button>
                         </div>
                         
-                        <div className="text-[9px] text-stone-500 font-mono leading-relaxed h-10 overflow-y-auto">
-                          Preços para erguer estruturas: Industrial (R$ 50B | 10 Aço), Refinaria (R$ 60B | 15 Aço | 5 Petróleo), Fortaleza (R$ 40B | 20 Aço), Logística (R$ 30B | 8 Aço).
+                        {/* Novos edifícios especializados */}
+                        {selectedProvince.hasRiver && (
+                          <button
+                            onClick={() => buildFacility('hydroelectric')}
+                            className="p-2 border border-stone-800 hover:border-yellow-500 rounded bg-stone-900 text-stone-300 hover:text-stone-100 text-left cursor-pointer transition flex justify-between items-center col-span-2"
+                          >
+                            <div>
+                              <strong className="block text-[10px] uppercase text-yellow-300">HIDROELÉTRICA (v{selectedProvince.buildings.hydroelectric ?? 0})</strong>
+                              <span className="text-[9px] leading-tight text-stone-400 font-mono">Gera +5⚡ Energia/turno. Requer rio. Bônus industrial de 8% por 5⚡.</span>
+                            </div>
+                            <Plus className="w-3.5 h-3.5 text-stone-400" />
+                          </button>
+                        )}
+
+                        <button
+                          onClick={() => buildFacility('airbase')}
+                          className="p-2 border border-stone-800 hover:border-sky-500 rounded bg-stone-900 text-stone-300 hover:text-stone-100 text-left cursor-pointer transition flex justify-between items-center"
+                        >
+                          <div>
+                            <strong className="block text-[10px] uppercase text-sky-300">BASE AÉREA (v{selectedProvince.buildings.airbase ?? 0})</strong>
+                            <span className="text-[9px] leading-tight text-stone-400 font-mono">Pré-requisito para aviação.</span>
+                          </div>
+                          <Plus className="w-3.5 h-3.5 text-stone-400" />
+                        </button>
+
+                        <button
+                          onClick={() => buildFacility('ethanolRefinery')}
+                          className="p-2 border border-stone-800 hover:border-lime-500 rounded bg-stone-900 text-stone-300 hover:text-stone-100 text-left cursor-pointer transition flex justify-between items-center"
+                        >
+                          <div>
+                            <strong className="block text-[10px] uppercase text-lime-300">REFINARIA DE ETANOL (v{selectedProvince.buildings.ethanolRefinery ?? 0})</strong>
+                            <span className="text-[9px] leading-tight text-stone-400 font-mono">-4 Alimento → +3 Petróleo/nível/turno.</span>
+                          </div>
+                          <Plus className="w-3.5 h-3.5 text-stone-400" />
+                        </button>
+
+                        <div className="text-[9px] text-stone-500 font-mono leading-relaxed col-span-2 h-10 overflow-y-auto">
+                          Preços: Industrial (R$50B|10Aço), Refinaria (R$60B|15Aço), Fortaleza (R$40B|20Aço), Logística (R$30B|8Aço), Hidroelétrica (R$80B|25Aço, requer rio), Base Aérea (R$70B|20Aço), Etanol (R$45B|10Aço).
                         </div>
                       </div>
 
